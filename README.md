@@ -12,7 +12,7 @@ This repository is organized as follow:
 
 Please refer to each folder for more details on each section.
 
-Logs and results from each projects can be found at.
+Logs and results from each projects will be made available in the coming months.
 
 ## Sensors
 To monitor the electricity of computing components, we used a precursor of [Alumet](https://alumet.dev/), that we called NVML sensor (CPU + GPU).
