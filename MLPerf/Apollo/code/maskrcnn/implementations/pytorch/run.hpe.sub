@@ -1,0 +1,190 @@
+#!/bin/bash
+#SBATCH --job-name=MLPerf21-maskrcnn
+## #SBATCH --ntasks-per-node=8
+## #SBATCH --ntasks-per-socket=4
+## #SBATCH --cpus-per-task=8
+#SBATCH --partition=champollion
+#SBATCH --ntasks=8
+#SBATCH --nodes=1
+#SBATCH --reservation=mlperf
+#SBATCH --nodelist=o186i225
+#SBATCH --exclusive
+
+set -euxo pipefail
+
+export LOGDIR=${curDir}/logs/${SLURM_JOB_ID}
+
+# monitoring RAPL and NVIDI-SMI
+srun --overlap -l -n${SLURM_JOB_NUM_NODES} bash -c 'echo -n "Creating directory at " && hostname && pwd && mkdir -p ${LOGDIR}/$(hostname)/'
+srun --overlap -l -n${SLURM_JOB_NUM_NODES} bash -c 'echo -n "Starting energy monitoring of ilo in " && hostname && bash ./pytorch/get_power.sh ${LOGDIR}/$(hostname)/ilo_power.csv' &
+srun --overlap -l -n${SLURM_JOB_NUM_NODES} bash -c 'echo -n "Starting energy monitoring of RAPL and nvidia-smi in " && hostname && ./pytorch/nvml_sensor --result-dir ${LOGDIR}/$(hostname)/ --period-seconds 0.5' &
+
+
+# Vars without defaults
+: "${DGXSYSTEM:?DGXSYSTEM not set}"
+: "${CONT:?CONT not set}"
+
+case $FS in
+        beeond | lvol | nfsond )
+            export TGT_DIR="/${FS}/bruno/mlperf"
+            mkdir -p ${TGT_DIR}
+            pushd .
+            cd ${TGT_DIR}
+            tar xf /pfss/nvmefs1/bruno/MLCOMMONS/training2.1/bert/bert.tar
+            popd
+            export DATADIR="${TGT_DIR}/hdf5/training-4320/hdf5_4320_shards_varlength" #<path/to/4320_shards_varlength/dir>
+            ;;
+        daos )
+            srun --ntasks="${SLURM_JOB_NUM_NODES}" bash -c "export LD_PRELOAD=/usr/lib64/libioil.so"
+            export TGT_DIR="/${FS}/bruno/mlperf"
+            mkdir -p ${TGT_DIR}
+            pushd .
+            cd ${TGT_DIR}
+            tar xf /pfss/nvmefs1/bruno/MLCOMMONS/training2.1/bert/bert.tar
+            popd
+            export DATADIR="${TGT_DIR}/hdf5/training-4320/hdf5_4320_shards_varlength" #<path/to/4320_shards_varlength/dir>
+            ;;
+        pfss)
+	        echo "using DATADIR = $DATADIR and PKLDIR = $PKLDIR "            
+            ;;
+esac
+
+
+# Vars with defaults
+: "${MLPERF_RULESET:=2.1.0}"
+: "${NEXP:=1}"
+: "${DATESTAMP:=$(date +'%y%m%d%H%M%S%N')}"
+: "${CLEAR_CACHES:=1}"
+: "${LOGDIR:=./results}"
+: "${API_LOG_DIR:=./api_logs}" # apiLog.sh output dir
+
+LOGBASE="${DATESTAMP}"
+TIME_TAGS=${TIME_TAGS:-0}
+NVTX_FLAG=${NVTX_FLAG:-0}
+NCCL_TEST=${NCCL_TEST:-0}
+SYNTH_DATA=${SYNTH_DATA:-0}
+EPOCH_PROF=${EPOCH_PROF:-0}
+DISABLE_CG=${DISABLE_CG:-0}
+
+set -x 
+export GPUS_PER_NODE=8
+export MASTER_ADDR=${SLURMD_NODENAME}
+export MASTER_PORT=9901
+export WORLD_SIZE=$(( GPUS_PER_NODE * SLURM_NNODES ))
+echo "[HPE] setting distributed info WORLD_SIZE=$WORLD_SIZE, MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
+
+set +x
+
+SPREFIX="object_detection_pytorch_${DGXNNODES}x${DGXNGPU}x${BATCHSIZE}_${DATESTAMP}"
+
+if [ ${TIME_TAGS} -gt 0 ]; then
+    LOGBASE="${SPREFIX}_mllog"
+fi
+if [ ${NVTX_FLAG} -gt 0 ]; then
+    if [[ "$LOGBASE" == *'_'* ]];then
+        LOGBASE="${LOGBASE}_nsys"
+    else
+        LOGBASE="${SPREFIX}_nsys"
+    fi
+    if [[ ! -d "${NVMLPERF_NSIGHT_LOCATION}" ]]; then
+	echo "$NVMLPERF_NSIGHT_LOCATION doesn't exist on this system!" 1>&2
+	exit 1
+    fi
+fi
+if [ ${SYNTH_DATA} -gt 0 ]; then
+    if [[ "$LOGBASE" == *'_'* ]];then
+        LOGBASE="${LOGBASE}_synth"
+    else
+        LOGBASE="${SPREFIX}_synth"
+    fi
+fi
+if [ ${EPOCH_PROF} -gt 0 ]; then
+    if [[ "$LOGBASE" == *'_'* ]];then
+        LOGBASE="${LOGBASE}_epoch"
+    else
+        LOGBASE="${SPREFIX}_epoch"
+    fi
+fi
+if [ ${DISABLE_CG} -gt 0 ]; then
+    EXTRA_CONFIG=$(echo $EXTRA_CONFIG | sed 's/USE_CUDA_GRAPH\sTrue/USE_CUDA_GRAPH False/')
+
+    if [[ "$LOGBASE" == *'_'* ]];then
+        LOGBASE="${LOGBASE}_nocg"
+    else
+        LOGBASE="${SPREFIX}_nocg"
+    fi
+fi
+
+# Other vars
+readonly _logfile_base="${LOGDIR}/${LOGBASE}"
+readonly _cont_name=object_detection
+_cont_mounts="/apps:/apps,/nfs:/nfs,${SCRIPTDIR}/pytorch:/workspace/object_detection,${DATADIR}:/data,${PKLDIR}:/pkl_coco,${DATADIR}/coco2017:/coco,${LOGDIR}:/results"
+
+if [[ "${NVTX_FLAG}" -gt 0 ]]; then
+    _cont_mounts+=",${NVMLPERF_NSIGHT_LOCATION}:/nsight"
+fi
+if [ "${API_LOGGING:-}" -eq 1 ]; then
+    _cont_mounts="${_cont_mounts},${API_LOG_DIR}:/logs"
+fi
+
+# MLPerf vars
+MLPERF_HOST_OS=$(srun -N1 -n1 bash <<EOF
+EOF
+)
+export MLPERF_HOST_OS
+
+# Setup directories
+( umask 0002; mkdir -p "${LOGDIR}" )
+srun  --overlap --ntasks="${SLURM_JOB_NUM_NODES}" mkdir -p "${LOGDIR}"
+
+# Setup container
+echo MELLANOX_VISIBLE_DEVICES="${MELLANOX_VISIBLE_DEVICES:-}"
+srun  --overlap --ntasks="${SLURM_JOB_NUM_NODES}" --container-image="${CONT}"  --container-mounts="${_cont_mounts}" --container-name="${_cont_name}" true
+srun  --overlap -N1 -n1 --container-name="${_cont_name}"   --container-mounts="${_cont_mounts}" ibv_devinfo --list
+srun  --overlap -N1 -n1 --container-name="${_cont_name}"   --container-mounts="${_cont_mounts}" nvidia-smi topo -m
+
+echo "NCCL_TEST = ${NCCL_TEST}"
+if [[ ${NCCL_TEST} -eq 1 ]]; then
+    (srun  --overlap --mpi=pmix --ntasks="$(( SLURM_JOB_NUM_NODES * DGXNGPU ))" --ntasks-per-node="${DGXNGPU}" \
+         --container-name="${_cont_name}"  --container-mounts="${_cont_mounts}" all_reduce_perf_mpi -b 82.6M -e 82.6M -d half \
+)  |& tee "${LOGDIR}/${SPREFIX}_nccl.log"
+
+fi
+
+# Run experiments
+for _experiment_index in $(seq -w 1 "${NEXP}"); do
+    (
+        echo "Sleeping before trial ${_experiment_index} of ${NEXP}"
+        sleep 30
+        echo "Beginning trial ${_experiment_index} of ${NEXP}"
+	    echo ":::DLPAL ${CONT} ${SLURM_JOB_ID} ${SLURM_JOB_NUM_NODES} ${SLURM_JOB_NODELIST}"
+
+        # Print system info
+        srun  --overlap --ntasks="${SLURM_JOB_NUM_NODES}" --container-name="${_cont_name}"  --container-mounts="${_cont_mounts}"  python /workspace/object_detection/show_mask.py
+
+        # Clear caches
+        if [ "${CLEAR_CACHES}" -eq 1 ]; then
+            srun --ntasks="${SLURM_JOB_NUM_NODES}" bash -c "echo -n 'Clearing cache on ' && hostname && sync && sudo /sbin/sysctl vm.drop_caches=3"
+            srun --ntasks="${SLURM_JOB_NUM_NODES}" --container-name="${_cont_name}"  --container-mounts="${_cont_mounts}"  python  /workspace/object_detection/drop.py
+        fi
+
+        # Run experiment
+        srun  --overlap --mpi=none --ntasks="$(( SLURM_JOB_NUM_NODES * DGXNGPU ))" --ntasks-per-node="${DGXNGPU}" \
+            --container-name="${_cont_name}" --container-mounts="${_cont_mounts}" \
+            ./run_and_time.sh
+
+        echo "Sleeping after trial ${_experiment_index} of ${NEXP} finished."
+        sleep 30
+    
+    ) |& tee "${_logfile_base}_${_experiment_index}.log"
+
+    # # compliance checker
+    # srun --ntasks=1 --nodes=1 --container-name="${_cont_name}" \
+    #      --container-mounts="$(realpath ${LOGDIR}):/results"   \
+    #      --container-workdir="/results"                        \
+    #      python3 -m mlperf_logging.compliance_checker --usage training \
+    #      --ruleset "${MLPERF_RULESET}"                                 \
+    #      --log_output "/results/compliance_${DATESTAMP}.out"           \
+    #      "/results/${LOGBASE}_${_experiment_index}.log" \
+	#  || true
+done

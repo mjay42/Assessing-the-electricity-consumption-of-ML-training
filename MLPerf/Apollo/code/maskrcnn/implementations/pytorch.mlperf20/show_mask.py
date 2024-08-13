@@ -1,0 +1,3 @@
+from mlperf_logging.mllog import constants
+from maskrcnn_benchmark.utils.mlperf_logger import mlperf_submission_log
+mlperf_submission_log(constants.MASKRCNN)
