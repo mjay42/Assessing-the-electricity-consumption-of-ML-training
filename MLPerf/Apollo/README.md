@@ -23,7 +23,7 @@ The analysis can be done on a different machine, but requires parsing:
 ```
 python parse_logs.py 
     --model bert 
-    --log_dir "/nfs/matjay/github/training2.1/HPE/benchmarks/bert/implementations/logs" 
-    --save_dir "/nfs/matjay/github/training2.1/HPE/benchmarks/bert/implementations/processed_logs"
+    --log_dir "bert/implementations/logs" 
+    --save_dir "bert/implementations/processed_logs"
     --TimeSeries
 ```
