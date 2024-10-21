@@ -1,7 +1,7 @@
-# Measuring the electricity consumption of Stable Diffusion
+# Measuring the electricity consumption of training and inferring from Stable Diffusion
 This project was developed on the Lyon site of the Grid'5000 test bed. You will need to ssh there to execute the code.
 
-The librairies required were installed using Miniconda3 that can be loaded as a module in Grid'5000 (`module load conda`).
+The libraries required were installed using Miniconda3 that can be loaded as a module in Grid'5000 (`module load conda`).
 The requirements are listed in the file with the same name. 
 
 You will have to modify the parameters in the bash files.
@@ -14,9 +14,9 @@ bash code/run_inference.sh <result folder path>
 ```
 ## Training
 ```
-bash code/run_inference.sh <result folder path>
+bash code/run_training.sh <result folder path>
 ```
-## Automate reservation of Grid'5000 jobs
+## Automate the reservation of Grid'5000 jobs
 Example of use: 
 ```
     python start_job.py --site_id lyon \
